@@ -6,6 +6,7 @@ import glob
 from multiprocessing import Pool
 import os
 
+from astropy.io import ascii
 from astropy.io import fits
 from astropy.stats import sigma_clip
 from astropy.stats import sigma_clipped_stats
@@ -18,7 +19,7 @@ from photutils import daofind
 
 ## -- FUNCTIONS
 
-def main(data_dir = '../data/'):
+def main(data_dir = '../TRAPPIST-data/'):
     """
     Parameters
     ----------
@@ -40,13 +41,26 @@ def main(data_dir = '../data/'):
             else:
                 direct_file = infile
 
-    #reject_cosmic_rays(grism_files)
+   # reject_cosmic_rays(grism_files)
     print('CR rejection complete.')
 
-    corrected_files = glob.glob('{}*crcorr*.fits'.format(data_dir))
-
+    corrected_files = glob.glob('{}*crcorr2*.fits'.format(data_dir))
+    
+    wvs, sums = [], [] 
+    output_dict = {}
     for grism_file in corrected_files:
         
+        # This is cheating but specify a global scale
+        with fits.open(grism_file) as hdu:
+            data = hdu[1].data
+            med = np.median(data)
+            std = np.std(data)
+
+        global VMIN
+        VMIN = 21784.708984375
+        global VMAX
+        VMAX = 30807.462890625
+
         # Pull out the rootname for plotting porpoises.
         name = grism_file.split('_')[0]
 
@@ -57,9 +71,18 @@ def main(data_dir = '../data/'):
         subtracted_scan = scan - bkg
 
         # Sum and create spectra plots
-        plot_spectra_from_scan(subtracted_scan, name, direct_file, grism_file)
-    plt.savefig('test.png')
-    print('Plotted spectra for : {}'.format(name))
+        wv, col_sums = plot_spectra_from_scan(subtracted_scan, name, direct_file, grism_file)
+        wvs.append(wv)
+        sums.append(col_sums)
+        
+        output_dict['{}_wv'.format(name)] = wv
+        output_dict['{}_sum'.format(name)] = col_sums
+
+    ascii.write(output_dict, 'output.txt')
+    
+    for n, wv in enumerate(wvs):
+        plt.plot(wv, sums[n])
+    plt.savefig('spectrum_overlay.png')
 
 def common_min_max(dat, slice_index, common=3):
     """ Takes slices as determined by slice_index
@@ -98,13 +121,9 @@ def common_min_max(dat, slice_index, common=3):
         if len(min_diff_index[0]) == 1 and min_diff_index[0][0] not in features:
             min_index.append(min_diff_index[0][0])
         
-    print(max_index)
-    print(min_index)
-    print('---')
     common_max = max(max_index, key=max_index.count)
     common_min = max(min_index, key=min_index.count)
     
-    print(common_max, common_min)
     return common_max, common_min
 
 
@@ -190,24 +209,23 @@ def fit_rectangle(grism_file, name, rectangle=False):
     
     # Now horizontal
     m, n = np.shape(vertical_region)
-    slice_index = np.arange(0, m, 5)
     if rectangle:
         common_max, common_min = rectangle[1]
+        common_max += 5
+        common_min -= 5
     else:
-        common_max, common_min = common_min_max(np.transpose(vertical_region), slice_index)
-    common_max += 5
-    common_min -= 5
+        common_max, common_min = n-10, 10 
     scan = vertical_region[:, common_min:common_max]
     horizontal_range = (common_min, common_max)
     data[:, common_max] = replace_val
     data[:, common_min] = replace_val
-    
+     
     # Save a plot of the region
-    plt.imshow(data, cmap='viridis', vmin=21784.708984375, vmax=30807.462890625)
+    plt.imshow(data, cmap='viridis', vmin=VMIN, vmax=VMAX)
     plt.savefig('{0}/regions/{1}_cutoffs.png'.format('/'.join(name.split('/')[:-1]), name.split('/')[-1]))
     plt.clf()
    
-    plt.imshow(scan, cmap='viridis', vmin=21784.708984375, vmax=30807.462890625)
+    plt.imshow(scan, cmap='viridis', vmin=VMIN, vmax=VMAX)
     plt.savefig('{0}/regions/{1}_scans.png'.format('/'.join(name.split('/')[:-1]), name.split('/')[-1]))
     plt.clf()
     
@@ -252,16 +270,15 @@ def find_cosmic_rays(time_col):
     cosmic_rays : list of tuples
         A list of cosmic rays.
     """
+    old_col = time_col.copy()
     time_col = time_col.copy() 
     clipped_col = sigma_clip(time_col, sigma=5)
     crs = clipped_col.data[clipped_col.mask]
-     
     cosmic_rays = []
     if len(crs) > 0:
         for cr in crs:
             index = np.where(cr == time_col)[0]
             time_col[np.where(cr == time_col)] = np.median(time_col)
-    
     return time_col
 
 
@@ -340,7 +357,8 @@ def reject_cosmic_rays(grism_files, n_iter=3):
         The number of times to do interatively flag
         crs.
     """
-
+    
+    # Create a stack of the visit
     with fits.open(grism_files[0]) as hdu:
         cr_stack = np.array([hdu[1].data.copy()])
 
@@ -351,26 +369,45 @@ def reject_cosmic_rays(grism_files, n_iter=3):
     d, m, n = np.shape(cr_stack)
 
     count = 0
-    while count < n_iter:
+    cosmic_rays = True
+    while cosmic_rays:
+
+        # Flatten the stack for parallelization
         flat_stack = cr_stack.reshape((d, m*n)).transpose() 
         p = Pool(8)
         results = np.array(p.map(find_cosmic_rays, flat_stack)).transpose()
         reshaped_results = np.array(results).reshape((d, m, n))
+        
+        # Remove any extended cosmic ray that probably isn't a cosmic ray
+        diff = np.array(reshaped_results == cr_stack, dtype=int)
+        for index_d, img in enumerate(diff):
+            for index_m, row in enumerate(img):
+                row_str = ''.join(str(elem) for elem in row)
+                extended_cr = [len(cr) > 5 for cr in row_str.split('1')]
+                if True in extended_cr:
+                    print('Found a fake/extended CR in {}.'.format(grism_files[index_d]))
+                    reshaped_results[index_d, index_m, :] = cr_stack[index_d, index_m, :]
+        
+        # See if any cosmic rays remain
+        if np.sum(reshaped_results - cr_stack) == 0:
+            cosmic_rays = False
+        cr_stack = reshaped_results
         count += 1
         print('Iteration {} complete!'.format(count))
-        
+    
+    # Write out corrections
     for index, grism_file in enumerate(grism_files):
         with fits.open(grism_file) as hdu:
             hdu[1].data = cr_stack[index]
             name_bits = grism_file.split('_ima')
-            new_file = '{}_crcorr_ima{}'.format(name_bits[0], name_bits[1])
+            new_file = '{}_crcorr2_ima{}'.format(name_bits[0], name_bits[1])
             hdu.writeto(new_file, overwrite=True)
             print('New file written to {}.'.format(new_file))
 
     
 
-
 ## -- RUN
 
 if __name__ == "__main__":
-    main()
+    #main()
+    main(data_dir = '../HAT-data/')
