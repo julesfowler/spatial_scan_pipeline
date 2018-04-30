@@ -5,6 +5,7 @@
 import glob
 from multiprocessing import Pool
 import os
+import sys
 
 from astropy.io import ascii
 from astropy.io import fits
@@ -409,5 +410,5 @@ def reject_cosmic_rays(grism_files, n_iter=3):
 ## -- RUN
 
 if __name__ == "__main__":
-    #main()
-    main(data_dir = '../HAT-data/')
+    path = sys.argv[1]
+    main(data_dir = path)

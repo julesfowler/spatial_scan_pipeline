@@ -1,0 +1,19 @@
+***** SPATIAL SCAN PIPELINE *****
+
+
+
+This is a nice overview of what this pipeline does...
+
+This pipeline is intended to reduce WFC3/IR grism spatial scan data. It was
+trained on HAT-36(?) data for an optimal TRAPPIST analysis. It is -- at present
+-- fully automated. You simply feed it all of your files from any given visit
+and it doe the rest.
+>>> python sketch.py <path_to_ima_files>
+
+
+Right now this exists as a single module. This won't be permanent -- soon this
+will consists of multiple modules -- including (probably) a verbose plotting
+wrapper that runs through the pipeline but saves lots of check-in outputs at
+each step.
+
+
